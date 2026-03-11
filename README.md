@@ -21,23 +21,23 @@ If you'd like to understand how this works in detail, please check out [this blo
 
    ```json
    {
-  "servers": {
-    "ciscoNdServer": {
-      "type": "stdio",
-      "command": "/path-to-bin/uv",
-      "args": [
-        "run",
-        "--with",
-        "mcp[cli]",
-        "mcp",
-        "run",
-        "/path-to-your-app/main.py"
-      ]
-    }
-  }
-}
-```
-    - Make sure to update the `command` and the path to your `main.py` as needed.
+     "servers": {
+       "ciscoNdServer": {
+         "type": "stdio",
+         "command": "/Users/user/.local/bin/uv",
+         "args": [
+           "run",
+           "--with",
+           "mcp[cli]",
+           "mcp",
+           "run",
+           "/Users/user/Coding/MCP_server_for_Cisco_ND/app/main.py"
+         ]
+       }
+     }
+   }
+   ```
+
 3. Instruct Claude Desktop or VS Code to use it:
    - See [Claude Desktop Quickstart](https://modelcontextprotocol.io/quickstart/user)
    - See [VS Code Copilot MCP Servers](https://code.visualstudio.com/docs/copilot/chat/mcp-servers)
