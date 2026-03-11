@@ -3,6 +3,7 @@ import asyncio
 import os
 import json
 import logging
+from urllib.parse import quote
 from   auth_manager import nd_auth_manager 
 from   mcp.server.fastmcp import FastMCP
 
@@ -11,6 +12,30 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("NDmcp")
 
 mcp = FastMCP("NDmcp") 
+
+
+def _extract_items_by_policy(payload: dict, policy: str):
+    if not isinstance(payload, dict):
+        return []
+
+    policy_candidates = [
+        policy,
+        policy.lower(),
+        policy[0].lower() + policy[1:] if policy else policy,
+        policy.rstrip("s"),
+    ]
+
+    for key in policy_candidates:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+
+    for key in ["items", "data", "results", "value"]:
+        value = payload.get(key)
+        if isinstance(value, list):
+            return value
+
+    return []
 
 @mcp.tool()
 async def list_nd_fabrics() -> str:
@@ -130,6 +155,143 @@ async def collect_nd_switches(fabric_name: str = None, max_results: int = 1000) 
             "fabricFilter": fabric_name or "all"
         },
         "switches": normalized
+    }
+    return json.dumps(result, indent=2)
+
+
+@mcp.tool()
+async def collect_nd_fabric_policy(
+    fabric_name: str,
+    policy: str,
+    max_results: int = 1000
+) -> str:
+    """
+    Collects logical policies from a fabric using a generic endpoint selection.
+
+    ACI endpoint pattern:
+      /api/v1/analyze/securitySegmentation/<policy>?fabricName=<fabricName>&max=1000
+      Supported policies: tenants, vrfs, epgs, securityGroups, l3Outs, contracts
+
+    VXLAN endpoint pattern:
+      /api/v1/manage/fabrics/<fabricName>/<policy>&max=1000
+      Policy examples: networks, vrfs, etc.
+
+    Args:
+        fabric_name (str): Name of the fabric.
+        policy (str): Policy resource to retrieve.
+        max_results (int, optional): Maximum number of items to return.
+    Returns:
+        str: JSON summary and collected policy items.
+    """
+    if not fabric_name:
+        return "fabric_name is required."
+    if not policy:
+        return "policy is required."
+
+    policy = policy.strip()
+    policy_lower = policy.lower()
+
+    aci_supported_policies = {
+        "tenants", "vrfs", "epgs", "securitygroups", "l3outs", "contracts"
+    }
+
+    if max_results <= 0:
+        max_results = 1000
+
+    await nd_auth_manager.initialize()
+    token = await nd_auth_manager.get_access_token()
+    nd_host = os.getenv("ND_HOST")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json"
+    }
+
+    async with httpx.AsyncClient(verify=False) as client:
+        try:
+            fabrics_url = f"https://{nd_host}/api/v1/manage/fabrics"
+            fabrics_resp = await client.get(fabrics_url, headers=headers, timeout=20.0)
+            fabrics_resp.raise_for_status()
+            fabrics_payload = fabrics_resp.json()
+        except Exception as e:
+            logger.error(f"Error fetching fabrics from ND: {e}")
+            return f"Error fetching fabrics from ND: {e}"
+
+        fabrics = fabrics_payload.get("fabrics", [])
+        selected_fabric = next(
+            (f for f in fabrics if str(f.get("name", "")).lower() == fabric_name.lower()),
+            None
+        )
+
+        if not selected_fabric:
+            return f"Fabric '{fabric_name}' not found on Nexus Dashboard."
+
+        management = selected_fabric.get("management", {})
+        fabric_type = str(management.get("type", "")).lower()
+        is_aci = fabric_type == "aci"
+
+        if is_aci and policy_lower not in aci_supported_policies:
+            return (
+                "Invalid ACI policy. Supported ACI policies are: "
+                "tenants, vrfs, epgs, securityGroups, l3Outs, contracts."
+            )
+
+        all_items = []
+        page_size = min(1000, max_results)
+        offset = 0
+
+        try:
+            while len(all_items) < max_results:
+                if is_aci:
+                    url = (
+                        f"https://{nd_host}/api/v1/analyze/securitySegmentation/{quote(policy, safe='')}"
+                        f"?fabricName={quote(fabric_name, safe='')}&max={page_size}&offset={offset}"
+                    )
+                else:
+                    separator = "?" if "?" not in policy else "&"
+                    policy_part = quote(policy, safe='/?=&')
+                    url = (
+                        f"https://{nd_host}/api/v1/manage/fabrics/{quote(fabric_name, safe='')}/{policy_part}"
+                        f"{separator}max={page_size}&offset={offset}"
+                    )
+
+                response = await client.get(url, headers=headers, timeout=30.0)
+                response.raise_for_status()
+                payload = response.json()
+
+                page_items = _extract_items_by_policy(payload, policy)
+                if not page_items:
+                    break
+
+                all_items.extend(page_items)
+
+                remaining = (
+                    payload.get("meta", {})
+                    .get("counts", {})
+                    .get("remaining")
+                )
+                offset += len(page_items)
+
+                if remaining in (None, 0):
+                    break
+        except Exception as e:
+            logger.error(f"Error fetching policy '{policy}' for fabric '{fabric_name}': {e}")
+            return f"Error fetching policy '{policy}' for fabric '{fabric_name}': {e}"
+
+    if not all_items:
+        return "No policy records found matching the criteria."
+
+    limited = all_items[:max_results]
+
+    result = {
+        "summary": {
+            "fabricName": fabric_name,
+            "fabricType": "aci" if is_aci else fabric_type or "non-aci",
+            "policy": policy,
+            "returned": len(limited),
+            "totalMatched": len(all_items)
+        },
+        "items": limited
     }
     return json.dumps(result, indent=2)
 
