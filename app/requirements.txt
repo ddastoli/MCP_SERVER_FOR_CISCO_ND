@@ -1,0 +1,7 @@
+mcp
+httpx
+dotenv
+pydantic
+logging
+asyncio
+typing

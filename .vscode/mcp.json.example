@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "ciscoApicServer": {
+      "type": "stdio",
+      "command": "/path-to-bin/uv",
+      "args": [
+        "run",
+        "--with",
+        "mcp[cli]",
+        "mcp",
+        "run",
+        "/path-to-your-app/main.py"
+      ]
+    }
+  }
+}
