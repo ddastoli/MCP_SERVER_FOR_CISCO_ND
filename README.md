@@ -8,12 +8,12 @@ If you'd like to understand how this works in detail, please check out [this blo
 
 ## Features
 
-- Exposes two tools for APIC interaction (see `app/main.py` for details).
+- Exposes two tools for Nexus Dashboard interaction (see `app/main.py` for details).
 - Easily configurable via environment variables.
 
 ## Setup
 
-1. **Specify APIC credentials** in the `.env` file.
+1. **Specify Nexus Dashboard credentials** in the `.env` file.
 2. If you want Claude or VS Code to run the Python code directly (no container), install [UV](https://docs.astral.sh/uv/)
 3. **Register the MCP server** with Claude or VS Code.
 
@@ -21,23 +21,23 @@ If you'd like to understand how this works in detail, please check out [this blo
 
    ```json
    {
-     "servers": {
-       "ciscoApicServer": {
-         "type": "stdio",
-         "command": "C:\\Users\\<user>\\.local\\bin\\uv.EXE",
-         "args": [
-           "run",
-           "--with",
-           "mcp[cli]",
-           "mcp",
-           "run",
-           "C:\\MCP\\app\\main.py"
-         ]
-       }
-     }
-   }
-   ```
-
+  "servers": {
+    "ciscoNdServer": {
+      "type": "stdio",
+      "command": "/path-to-bin/uv",
+      "args": [
+        "run",
+        "--with",
+        "mcp[cli]",
+        "mcp",
+        "run",
+        "/path-to-your-app/main.py"
+      ]
+    }
+  }
+}
+```
+    - Make sure to update the `command` and the path to your `main.py` as needed.
 3. Instruct Claude Desktop or VS Code to use it:
    - See [Claude Desktop Quickstart](https://modelcontextprotocol.io/quickstart/user)
    - See [VS Code Copilot MCP Servers](https://code.visualstudio.com/docs/copilot/chat/mcp-servers)
