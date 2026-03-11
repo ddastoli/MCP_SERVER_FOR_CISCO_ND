@@ -1,6 +1,5 @@
 .venv/
 app/__pycache__/
-app/.env/
+app/.env
 .DS_Store
 .vscode/mcp.json
-.env

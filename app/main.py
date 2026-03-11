@@ -37,137 +37,229 @@ async def list_nd_fabrics() -> str:
         except Exception as e:
             return f"Error fetching fabrics from ND: {e}"
 
-@mcp.tool()
-async def collect_nd_all_interfaces() -> str:
-    """
-    Collects all interfaces from all fabrics onboarded on ND.
-    Returns:
-        str: JSON list of all interfaces from all fabrics.
-    """
 
+@mcp.tool()
+async def collect_nd_switches(fabric_name: str = None, max_results: int = 1000) -> str:
+    """
+    Collects switches from Nexus Dashboard inventory endpoint.
+    API: /api/v1/manage/inventory/switches?max=1000
+    Args:
+        fabric_name (str, optional): Filter by a specific fabric name.
+        max_results (int, optional): Maximum number of switches to return.
+    Returns:
+        str: JSON with summary and normalized switch details.
+    """
     await nd_auth_manager.initialize()
     token = await nd_auth_manager.get_access_token()
     nd_host = os.getenv("ND_HOST")
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
-    fabrics_url = f"https://{nd_host}/api/v1/manage/fabrics"
+    if max_results <= 0:
+        max_results = 1000
+
+    page_size = min(1000, max_results)
+    offset = 0
+    all_switches = []
+
     async with httpx.AsyncClient(verify=False) as client:
         try:
-            fabrics_resp = await client.get(fabrics_url, headers=headers, timeout=15.0)
-            fabrics_resp.raise_for_status()
-            fabrics = fabrics_resp.json().get("fabrics", [])
+            while len(all_switches) < max_results:
+                url = f"https://{nd_host}/api/v1/manage/inventory/switches?max={page_size}&offset={offset}"
+                response = await client.get(url, headers=headers, timeout=30.0)
+                response.raise_for_status()
+                payload = response.json()
+
+                switches_page = payload.get("switches", [])
+                if not isinstance(switches_page, list) or not switches_page:
+                    break
+
+                all_switches.extend(switches_page)
+
+                remaining = (
+                    payload.get("meta", {})
+                    .get("counts", {})
+                    .get("remaining")
+                )
+                offset += len(switches_page)
+
+                if remaining in (None, 0):
+                    break
         except Exception as e:
-            return f"Error fetching fabrics from ND: {e}"
+            logger.error(f"Error fetching switches from ND: {e}")
+            return f"Error fetching switches from ND: {e}"
 
-        all_interfaces = []
-        for fabric in fabrics:
-            fabric_name = fabric.get("name")
-            if not fabric_name:
-                continue
-            interfaces_url = f"https://{nd_host}/api/v1/analyze/interfaces?max=500&offset=0&fabricName={fabric_name}"
-            try:
-                intf_resp = await client.get(interfaces_url, headers=headers, timeout=15.0)
-                intf_resp.raise_for_status()
-                interfaces = intf_resp.json().get("interfaces", [])
-                for intf in interfaces:
-                    all_interfaces.append({
-                        "fabric": fabric_name,
-                        "interface": intf.get("interfaceName"),
-                        "type": intf.get("interfaceType"),
-                        "node": intf.get("switchName"),
-                        "operState": intf.get("operationalStatus")
-                    })
-            except Exception as e:
-                all_interfaces.append({"fabric": fabric_name, "error": str(e)})
+    if fabric_name:
+        fabric_name_lower = fabric_name.lower()
+        all_switches = [
+            sw for sw in all_switches
+            if str(sw.get("fabricName", "")).lower() == fabric_name_lower
+        ]
 
-    return json.dumps(all_interfaces, indent=2)
+    if not all_switches:
+        return "No switches found matching the criteria."
+
+    normalized = []
+    for sw in all_switches[:max_results]:
+        normalized.append({
+            "fabricName": sw.get("fabricName"),
+            "hostname": sw.get("hostname"),
+            "switchId": sw.get("switchId"),
+            "serialNumber": sw.get("serialNumber"),
+            "model": sw.get("model"),
+            "softwareVersion": sw.get("softwareVersion"),
+            "switchRole": sw.get("switchRole"),
+            "fabricType": sw.get("fabricType"),
+            "fabricManagementIp": sw.get("fabricManagementIp"),
+            "advisoryLevel": sw.get("advisoryLevel"),
+            "anomalyLevel": sw.get("anomalyLevel"),
+            "systemUpTime": sw.get("systemUpTime"),
+            "vpcConfigured": sw.get("vpcConfigured"),
+            "vendor": sw.get("additionalData", {}).get("vendor"),
+            "platformType": sw.get("additionalData", {}).get("platformType"),
+            "discoveryStatus": sw.get("additionalData", {}).get("discoveryStatus")
+        })
+
+    result = {
+        "summary": {
+            "returned": len(normalized),
+            "totalMatched": len(all_switches),
+            "fabricFilter": fabric_name or "all"
+        },
+        "switches": normalized
+    }
+    return json.dumps(result, indent=2)
 
 
 @mcp.tool()
-async def collect_nd_anomalies(severity: str = None, fabric_name: str = None) -> str:
+async def collect_nd_anomalies_v2(
+    severity: str = None,
+    fabric_name: str = None,
+    active_only: bool = True,
+    max_results: int = 200
+) -> str:
     """
-    Collects anomalies/events from Nexus Dashboard Insights across all fabrics.
+    Collects anomalies from Nexus Dashboard using /api/v1/analyze/anomalies/details.
     Args:
-        severity (str, optional): Filter by severity (critical, major, minor, warning, info). Default: all.
-        fabric_name (str, optional): Filter by specific fabric name. Default: all fabrics.
+        severity (str, optional): Filter by severity (critical, major, minor, warning, info).
+        fabric_name (str, optional): Filter by a specific fabric name.
+        active_only (bool, optional): If True, excludes cleared/expired anomalies.
+        max_results (int, optional): Maximum anomalies to include in output.
     Returns:
-        str: Formatted summary of anomalies with details.
+        str: Formatted anomaly summary and details.
     """
     await nd_auth_manager.initialize()
     token = await nd_auth_manager.get_access_token()
     nd_host = os.getenv("ND_HOST")
+    url = f"https://{nd_host}/api/v1/analyze/anomalies/details?max=1000"
+
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
 
-    async with httpx.AsyncClient(verify=False, timeout=30.0) as client:
-        # Get anomalies from ND Insights
-        anomalies_url = f"https://{nd_host}/api/v1/analyze/anomalies/summary?filter=acknowledged%3Afalse+AND+cleared%3Afalse"
-        params = {"category": "anomaly", "$page": 0, "$size": 500}
-        
-        if severity:
-            params["severity"] = severity.lower()
-        
+    if max_results <= 0:
+        max_results = 200
+
+    async with httpx.AsyncClient(verify=False) as client:
         try:
-            anomalies_resp = await client.get(anomalies_url, headers=headers, params=params)
-            anomalies_resp.raise_for_status()
-            data = anomalies_resp.json()
-            anomalies = data.get("value", {}).get("data", [])
+            response = await client.get(url, headers=headers, timeout=30.0)
+            response.raise_for_status()
+            payload = response.json()
         except Exception as e:
             logger.error(f"Error fetching anomalies from ND: {e}")
             return f"Error fetching anomalies from ND: {e}"
 
-        # Filter by fabric if specified
-        if fabric_name:
-            anomalies = [a for a in anomalies if a.get("fabricName") == fabric_name]
+    anomalies = payload.get("anomalies")
+    if not isinstance(anomalies, list):
+        anomalies = payload.get("value", {}).get("data", [])
 
-        if not anomalies:
-            return "No anomalies found matching the criteria."
+    if not isinstance(anomalies, list):
+        return "Error parsing anomalies response from ND: expected 'anomalies' list."
 
-        # Organize anomalies by severity
-        by_severity = {"critical": [], "major": [], "minor": [], "warning": [], "info": []}
-        for anomaly in anomalies:
-            sev = anomaly.get("severity", "info").lower()
-            if sev in by_severity:
-                by_severity[sev].append(anomaly)
+    severity_lower = severity.lower() if severity else None
+    fabric_name_lower = fabric_name.lower() if fabric_name else None
 
-        # Create summary
-        output = "\n" + "="*150 + "\n"
-        output += f"Nexus Dashboard Anomalies Summary - Total: {len(anomalies)}\n"
-        output += "="*150 + "\n\n"
+    filtered = []
+    for anomaly in anomalies:
+        anomaly_severity = str(anomaly.get("severity", "")).lower()
+        anomaly_fabric = str(anomaly.get("fabricName", "")).lower()
 
-        # Summary by severity
-        output += "Anomalies by Severity:\n"
-        output += f"  Critical: {len(by_severity['critical'])}\n"
-        output += f"  Major:    {len(by_severity['major'])}\n"
-        output += f"  Minor:    {len(by_severity['minor'])}\n"
-        output += f"  Warning:  {len(by_severity['warning'])}\n"
-        output += f"  Info:     {len(by_severity['info'])}\n\n"
+        if severity_lower and anomaly_severity != severity_lower:
+            continue
+        if fabric_name_lower and anomaly_fabric != fabric_name_lower:
+            continue
+        if active_only and (anomaly.get("cleared") is True or anomaly.get("expired") is True):
+            continue
 
-        # Detailed list
-        for sev_level in ["critical", "major", "minor", "warning", "info"]:
-            if by_severity[sev_level]:
-                output += f"\n{sev_level.upper()} Anomalies ({len(by_severity[sev_level])}):\n"
-                output += "-"*150 + "\n"
-                
-                for idx, anomaly in enumerate(by_severity[sev_level][:50], 1):  # Limit to 50 per severity
-                    fabric = anomaly.get("fabricName", "N/A")
-                    event_type = anomaly.get("type", "N/A")
-                    description = anomaly.get("description", "N/A")
-                    affected = anomaly.get("affectedObject", "N/A")
-                    timestamp = anomaly.get("timestamp", "N/A")
-                    
-                    output += f"{idx}. [{fabric}] {event_type}\n"
-                    output += f"   Description: {description}\n"
-                    output += f"   Affected: {affected}\n"
-                    output += f"   Time: {timestamp}\n\n"
+        filtered.append(anomaly)
 
-        output += "="*150 + "\n"
-        return output
+    if not filtered:
+        return "No anomalies found matching the criteria."
+
+    limited = filtered[:max_results]
+    counts = {"critical": 0, "major": 0, "minor": 0, "warning": 0, "info": 0, "other": 0}
+    for anomaly in limited:
+        sev = str(anomaly.get("severity", "other")).lower()
+        if sev in counts:
+            counts[sev] += 1
+        else:
+            counts["other"] += 1
+
+    lines = []
+    lines.append("=" * 140)
+    lines.append(f"Nexus Dashboard Anomalies - Returned: {len(limited)} / Matched: {len(filtered)}")
+    lines.append("=" * 140)
+    lines.append("")
+    lines.append("Severity Summary:")
+    lines.append(f"  Critical: {counts['critical']}")
+    lines.append(f"  Major:    {counts['major']}")
+    lines.append(f"  Minor:    {counts['minor']}")
+    lines.append(f"  Warning:  {counts['warning']}")
+    lines.append(f"  Info:     {counts['info']}")
+    lines.append(f"  Other:    {counts['other']}")
+    lines.append("")
+
+    for idx, anomaly in enumerate(limited, 1):
+        anomaly_id = anomaly.get("anomalyId", "N/A")
+        anomaly_type = anomaly.get("anomalyType") or anomaly.get("mnemonicTitle") or "N/A"
+        anomaly_text = anomaly.get("anomalyString") or anomaly.get("anomalyReason") or anomaly.get("mnemonicDescription") or "N/A"
+        anomaly_fabric = anomaly.get("fabricName", "N/A")
+        anomaly_severity = anomaly.get("severity", "N/A")
+        start_time = anomaly.get("startTimestamp") or anomaly.get("startDate") or "N/A"
+        end_time = anomaly.get("endTimestamp") or anomaly.get("endDate") or "N/A"
+        verification_status = anomaly.get("verificationStatus", "N/A")
+        cleared = anomaly.get("cleared", False)
+        expired = anomaly.get("expired", False)
+        score = anomaly.get("anomalyScore", "N/A")
+
+        anomaly_objects = anomaly.get("anomalyObjects", [])
+        primary_obj = {}
+        if isinstance(anomaly_objects, list) and anomaly_objects:
+            primary_obj = next((obj for obj in anomaly_objects if obj.get("isPrimary")), anomaly_objects[0])
+
+        affected_name = primary_obj.get("name") or primary_obj.get("identifier") or "N/A"
+        affected_type = primary_obj.get("objectType") or "N/A"
+        node_names = anomaly.get("nodeNames", [])
+        node_list = ", ".join(node_names[:8]) if isinstance(node_names, list) and node_names else "N/A"
+
+        lines.append(f"{idx}. [{anomaly_fabric}] {anomaly_type} ({anomaly_severity})")
+        lines.append(f"   ID: {anomaly_id}")
+        lines.append(f"   Score: {score} | Verification: {verification_status} | Cleared: {cleared} | Expired: {expired}")
+        lines.append(f"   Affected: {affected_name} ({affected_type})")
+        lines.append(f"   Nodes: {node_list}")
+        lines.append(f"   Start: {start_time}")
+        lines.append(f"   End:   {end_time}")
+        lines.append(f"   Reason: {anomaly_text}")
+        lines.append("")
+
+    lines.append("=" * 140)
+    return "\n".join(lines)
+
+
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 {
   "servers": {
-    "ciscoApicServer": {
+    "ciscoNDServer": {
       "type": "stdio",
       "command": "/path-to-bin/uv",
       "args": [
